@@ -1,0 +1,1838 @@
+hook.remove("render", "perpetual")
+gui.remove("perpetual")
+gui.remove("Gakuran V2")
+gui.remove("Gakuran Parry")
+
+_G.__perpetual_run = (_G.__perpetual_run or 0) + 1
+local RUN_ID = _G.__perpetual_run
+
+-- ================= colors =================
+local COLOR_GREEN  = color(0, 1, 0, 1)
+local COLOR_YELLOW = color(1, 1, 0, 1)
+local COLOR_CYAN   = color(0, 1, 1, 1)
+local COLOR_RED    = color(1, 0.2, 0.2, 1)
+local COLOR_WHITE  = color(1, 1, 1, 1)
+local RING_COLOR   = color(0.2, 0.8, 1, 1)
+local DODGE_RING_COLOR = color(1, 0.72, 0.15, 1)
+local CONE_COLOR   = color(1, 0.2, 0.2, 1)
+local RANGE_COLOR  = color(1, 0.2, 0.2, 1)
+local OTHER_TARGET_COLOR = color(0.72, 0.28, 1, 1)
+
+-- ================= memory offsets (auto-sync, hardcoded fallback) =================
+local OFF = {
+    ActiveAnimations = 0xA20,
+    AnimTrack        = 0xB8,
+    TimePosition     = 0xD8,
+    AnimationId      = 0xC0,
+    GuiText          = 0xDA0,
+    NodeSlot         = 0x10,
+    ListNext         = 0x0,
+}
+
+http.get("https://raw.githubusercontent.com/Tolura/Photonation/refs/heads/main/OffsetAPI/offset.lua", function(body, status)
+    if status == 200 and body then
+        local chunk = load(body)
+        if chunk then chunk() end
+    end
+end)
+
+local offsets_synced = false
+
+-- ================= keys / attribute types =================
+local KEY_PARRY = 0x46
+local KEY_DODGE = 0x51
+local MOUSE1 = 0x01
+local MOUSE2 = 0x02
+local ATTR_NUMBER = 5
+local ATTR_STRING = 6
+
+-- ================= tunables (ms) =================
+local AutoParryRange = 11.5
+local M2DodgeRange = 8
+local ParryWindowMs = 150
+local DefaultParryTimeMs = 300
+local ParryOffsetMs = 0
+local BlockHoldMs = 200
+local ParryCooldownMs = 210
+
+-- ================= success / fail / stun signal animation ids =================
+local ParriedAnimation = {
+    ["rbxassetid://100773926241456"] = true,
+    ["rbxassetid://102823909334302"] = true,
+    ["rbxassetid://96304721384743"]  = true,
+    ["rbxassetid://82979105739696"]  = true,
+    ["rbxassetid://96600699015093"]  = true,
+    ["rbxassetid://138519505081692"] = true,
+}
+local StunnedAnimation = {
+    ["rbxassetid://9598562590"] = true,
+    ["rbxassetid://9598537410"] = true,
+    ["rbxassetid://9598551746"] = true,
+}
+local ParryFailed = {
+    ["rbxassetid://4210597123"] = true,
+}
+
+local IgnoreIds = {}
+for _, n in pairs({
+    73766443218740,111699625251889,85823794654077,83600639547203,99661732639863,106268941365574,109816855387997,122561749929324,129805948180579,
+    90752347516770,135133599113049,132695091086148,137015026151472,114511731321756,122541287927198,80309578200579,100794890036133,109303037515668,117293898907979,74690341409113,73090768467054,72284079162560,92787945841620,89016181362524,
+    76945839486275,101161965631044,80135556847061,128307941333158,85931837451298,91352556581859,104407197874289,77911299793653,129335968179665,122384188141033,
+    132695766056641,113331696487725,124220338099067,99799500309776,108636808436488,90015977935891,87932588807124,132477488202815,102982320608759,109278619250401,79971841883936,97783129267001,72822821848529,79974955602012,77798715679680,85845666927963,108862846290180,108045962864902,93184693099565,120399899079666,99958962160522,
+}) do
+    IgnoreIds["rbxassetid://" .. tostring(n)] = true
+end
+
+-- ================= GameConfig (ms) =================
+local function atk(display, parry_time_ms, options)
+    options = options or {}
+    return {
+        DisplayName = display,
+        ParryTimeMs = parry_time_ms,
+        ParryWindowMs = options.window,
+        HoldMs = options.hold,
+        DodgeTime = options.dodge,
+        DodgeWindowMs = options.dodgeWindow,
+        PostDodgeBlockDelay = options.postDodgeBlockDelay,
+        PostDodgeBlockHold = options.postDodgeBlockHold,
+    }
+end
+
+local RawConfig = {
+    KarateAnims = {
+        ["rbxassetid://137837926745158"] = atk("1stM1", 300, { hold = 300 }),
+        ["rbxassetid://100981571094705"] = atk("2ndM1", 300, { hold = 300 }),
+        ["rbxassetid://130865087635587"] = atk("3rdM1", 300, { hold = 300 }),
+        ["rbxassetid://86495068205420"]  = atk("4thM1", 350, { hold = 320 }),
+        ["rbxassetid://120393553812903"] = atk("M2", 500, { hold = 350 }),
+    },
+    BasicAnims = {
+        ["rbxassetid://83491849294956"]  = atk("1stM1", 300, { window = 100, hold = 320 }),
+        ["rbxassetid://89420531853362"]  = atk("2ndM1", 300, { window = 120, hold = 320 }),
+        ["rbxassetid://83730275893449"]  = atk("3rdM1", 300),
+        ["rbxassetid://106980660082799"] = atk("4thM1", 300, { hold = 320 }),
+        ["rbxassetid://78888626472394"]  = atk("M2", 520, { hold = 320 }),
+    },
+    WrestlingAnims = {
+        ["rbxassetid://91485623489753"]  = atk("4thM1", 330, { window = 110, hold = 280 }),
+        ["rbxassetid://73748315742870"]  = atk("M2", 500, { hold = 400, dodge = 400, dodgeWindow = 100 }),
+        ["rbxassetid://82903450925391"]  = atk("1stM1", 250, { window = 40, hold = 320 }),
+        ["rbxassetid://119685134442395"] = atk("2ndM1", 160, { window = 40, hold = 320 }),
+        ["rbxassetid://107464726433388"] = atk("3rdM1", 180, { window = 40, hold = 320 }),
+    },
+    MuayThaiAnims = {
+        ["rbxassetid://137034747040618"] = atk("M2", 520, { hold = 350 }),
+        ["rbxassetid://74960202100098"]  = atk("4thM1", 160, { window = 40, hold = 280 }),
+        ["rbxassetid://104515319350296"] = atk("3rdM1", 190, { window = 40, hold = 320 }),
+        ["rbxassetid://139911027872047"] = atk("2ndM1", 170, { window = 40, hold = 320 }),
+        ["rbxassetid://96726284968458"]  = atk("1stM1", 170, { window = 60, hold = 320 }),
+    },
+    BoxingAnims = {
+        ["rbxassetid://137980914350618"] = atk("1stM1", 220, { window = 90, hold = 300 }),
+        ["rbxassetid://100408082509740"] = atk("2ndM1", 220, { window = 85, hold = 300 }),
+        ["rbxassetid://94803478352691"]  = atk("3rdM1", 210, { window = 60, hold = 300 }),
+        ["rbxassetid://78695517680318"]  = atk("4thM1", 340, { window = 140, hold = 320 }),
+    },
+    HakariAnims = {
+        ["rbxassetid://82855179231529"]  = atk("MomentumM2", 520, { window = 160, hold = 450 }),
+        ["rbxassetid://76236532060812"]  = atk("1stM1", 340),
+        ["rbxassetid://74206130671324"]  = atk("2ndM1", 360),
+        ["rbxassetid://71919935695307"]  = atk("3rdM1", 340),
+        ["rbxassetid://122861547142657"] = atk("4thM1", 380, { hold = 320 }),
+        ["rbxassetid://92851992709496"]  = atk("M2", 520, { window = 160, hold = 450 }),
+    },
+    CapoeiraAnims = {
+        ["rbxassetid://125976167173936"] = atk("1stM1", 320, { hold = 300 }),
+        ["rbxassetid://134945199381140"] = atk("2ndM1", 400, { hold = 300 }),
+        ["rbxassetid://117877243065533"] = atk("3rdM1", 360, { hold = 300 }),
+        ["rbxassetid://106965238908791"] = atk("4thM1", 300, { hold = 300 }),
+        ["rbxassetid://131071815103338"] = atk("Whirlwind", 460),
+    },
+    SluggerAnims = {
+        ["rbxassetid://134829666925953"] = atk("1stM1", 430, { window = 40, hold = 300 }),
+        ["rbxassetid://104867156139010"] = atk("2ndM1", 390, { window = 40, hold = 300 }),
+        ["rbxassetid://112759168172605"] = atk("3rdM1", 390, { window = 40, hold = 300 }),
+        ["rbxassetid://114647502301740"] = atk("4thM1", 300, { window = 40, hold = 300 }),
+        ["rbxassetid://118943955490014"] = atk("M2", 730, { window = 40, hold = 350 }),
+    },
+    StrikerAnims = {
+        ["rbxassetid://127909081017342"] = atk("1stM1"),
+        ["rbxassetid://79563637573277"]  = atk("2ndM1"),
+        ["rbxassetid://118070233153900"] = atk("3rdM1"),
+        ["rbxassetid://77710266587706"]  = atk("4thM1"),
+        ["rbxassetid://114364673509520"] = atk("M2"),
+        ["rbxassetid://132840225082238"] = atk("1stM1"),
+        ["rbxassetid://88761422474765"]  = atk("2ndM1"),
+        ["rbxassetid://98462236639320"]  = atk("3rdM1"),
+        ["rbxassetid://122451562066756"] = atk("4thM1"),
+    },
+    KureAnims = {
+        ["rbxassetid://71676634048602"]  = atk("4thM1", 315, { window = 110, hold = 300 }),
+        ["rbxassetid://102407060635393"] = atk("M2", 200, { window = 100, hold = 300 }),
+        ["rbxassetid://82904229252991"]  = atk("1stM1", 300),
+        ["rbxassetid://103732110215321"] = atk("2ndM1", 300, { hold = 240 }),
+        ["rbxassetid://103964436023727"] = atk("3rdM1", 300, { hold = 240 }),
+    },
+    HakariOtherAnims = {
+        ["rbxassetid://126612786608030"] = atk("1stM1", 340),
+        ["rbxassetid://113719263885794"] = atk("2ndM1", 360),
+        ["rbxassetid://136305578634960"] = atk("3rdM1", 340),
+        ["rbxassetid://89039586375625"]  = atk("4thM1", 380, { hold = 320 }),
+        ["rbxassetid://82855179231529"]  = atk("MomentumM2", 520, { window = 160, hold = 450 }),
+        ["rbxassetid://101619248052969"] = atk("M2", 520, { window = 160, hold = 450 }),
+    },
+}
+
+local GameConfig = {}
+for styleName, moves in pairs(RawConfig) do
+    local sharedM1 = moves.M1Time
+    for assetId, data in pairs(moves) do
+        if assetId ~= "M1Time" then
+            local parry_time = data.ParryTimeMs
+            if data.DisplayName ~= "M2" and sharedM1 then
+                parry_time = sharedM1
+            end
+            GameConfig[assetId] = {
+                Style = styleName,
+                DisplayName = data.DisplayName,
+                ParryTimeMs = parry_time,
+                ParryWindowMs = data.ParryWindowMs,
+                HoldMs = data.HoldMs,
+                DodgeTime = data.DodgeTime,
+                DodgeWindowMs = data.DodgeWindowMs,
+                PostDodgeBlockDelay = data.PostDodgeBlockDelay,
+                PostDodgeBlockHold = data.PostDodgeBlockHold,
+                ParryFunction = data.ParryFunction,
+            }
+        end
+    end
+end
+
+local LoggedUnknown = {}
+local copy_unknown_ids
+local reset_settings
+
+-- ================= menu (declare BEFORE functions that read it) =================
+local MENU_NAME = "perpetual"
+local menu = gui.create(MENU_NAME, false)
+menu:set_size(390, 820)
+
+menu:add_label("--- Auto Parry ---")
+local parry_on   = menu:add_checkbox("Auto Parry", true)
+local facing_them = menu:add_checkbox("They Face Me", false)
+local facing_me   = menu:add_checkbox("I Face Them", false)
+local height_on   = menu:add_checkbox("Height Adjust", true)
+local ping_on     = menu:add_checkbox("Adaptive Ping", true)
+
+local range_s  = menu:add_slider("Range", 5, 80, AutoParryRange)
+local window_s = menu:add_slider("Parry Window (ms)", 10, 300, ParryWindowMs)
+local offset_s = menu:add_slider("Timing Offset (ms)", -200, 200, ParryOffsetMs)
+local default_s = menu:add_slider("Default Parry Time (ms)", 10, 1000, DefaultParryTimeMs)
+local cone_s   = menu:add_slider("Face Cone", 30, 360, 160)
+local vert_s   = menu:add_slider("Vertical Range", 2, 40, 8)
+local show_esp   = menu:add_checkbox("Show Range", true)
+local mark_rng   = menu:add_checkbox("Mark In Range", true)
+local mark_gate  = menu:add_checkbox("Mark Angle Only", false)
+
+menu:add_label("--- Auto Dodge ---")
+local dodge_on   = menu:add_checkbox("Dodge Close M2", false)
+local dodge_range_s = menu:add_slider("M2 Dodge Range", 1, 30, M2DodgeRange)
+local show_dodge_esp = menu:add_checkbox("Show Dodge Range", true)
+
+menu:add_label("--- Logs ---")
+local log_unknown = menu:add_checkbox("Log Unknown IDs", false)
+local debug_on    = menu:add_checkbox("Debug Log", false)
+local copy_ids_btn = menu:add_button("Copy Unknown IDs", function() copy_unknown_ids() end)
+
+menu:add_label("--- Instrument Autoplay ---")
+local instrument_on = menu:add_checkbox("Autoplay", false)
+
+menu:add_label("--- Settings ---")
+local reset_btn = menu:add_button("Reset To Defaults", function() reset_settings() end)
+
+local status_lbl = menu:add_label("status: idle")
+
+-- ================= settings persistence =================
+local SETTINGS_FILE = "perpetual_settings.json"
+
+local SAVED_CHECKS = {
+    { key = "parry_on",       label = "Auto Parry",         w = parry_on,       def = true  },
+    { key = "dodge_on",       label = "Dodge Close M2",     w = dodge_on,       def = false },
+    { key = "facing_them",    label = "They Face Me",       w = facing_them,    def = false },
+    { key = "facing_me",      label = "I Face Them",        w = facing_me,      def = false },
+    { key = "height_on",      label = "Height Adjust",      w = height_on,      def = true  },
+    { key = "ping_on",        label = "Adaptive Ping",      w = ping_on,        def = true  },
+    { key = "show_dodge_esp", label = "Show Dodge Range",   w = show_dodge_esp, def = true  },
+    { key = "log_unknown",    label = "Log Unknown IDs",    w = log_unknown,    def = false },
+    { key = "debug_on",       label = "Debug Log",          w = debug_on,       def = false },
+    { key = "show_esp",       label = "Show Range",         w = show_esp,       def = true  },
+    { key = "mark_rng",       label = "Mark In Range",      w = mark_rng,       def = true  },
+    { key = "mark_gate",      label = "Mark Angle Only",    w = mark_gate,      def = false },
+    { key = "instrument_on",  label = "Autoplay",           w = instrument_on,  def = false },
+}
+
+local SAVED_SLIDERS = {
+    { key = "range_s",   label = "Range",                  w = range_s,   def = AutoParryRange },
+    { key = "dodge_range_s", label = "M2 Dodge Range",      w = dodge_range_s, def = M2DodgeRange },
+    { key = "window_s",  label = "Parry Window (ms)",      w = window_s,  def = ParryWindowMs },
+    { key = "offset_s",  label = "Timing Offset (ms)",     w = offset_s,  def = ParryOffsetMs },
+    { key = "default_s", label = "Default Parry Time (ms)", w = default_s, def = DefaultParryTimeMs },
+    { key = "cone_s",    label = "Face Cone",              w = cone_s,    def = 160 },
+    { key = "vert_s",    label = "Vertical Range",         w = vert_s,    def = 8 },
+}
+
+local function settings_snapshot()
+    local t = { version = 5 }
+    for _, e in ipairs(SAVED_CHECKS) do
+        t[e.key] = e.w:get_value() and 1 or 0
+    end
+    for _, e in ipairs(SAVED_SLIDERS) do
+        t[e.key] = e.w:get_value()
+    end
+    return t
+end
+
+local function settings_save()
+    local ok, err = pcall(function()
+        file.overwrite(SETTINGS_FILE, table_to_JSON(settings_snapshot()))
+    end)
+    if not ok and debug_on:get_value() then
+        log.add("[settings] save failed: " .. tostring(err), COLOR_RED)
+    end
+    return ok
+end
+
+local function settings_load()
+    if not file.exists(SETTINGS_FILE) then return false end
+
+    local ok, data = pcall(function() return JSON_to_table(file.read(SETTINGS_FILE)) end)
+    if not ok or type(data) ~= "table" then
+        log.add("[settings] file unreadable -- using defaults", COLOR_RED)
+        return false
+    end
+
+    for _, e in ipairs(SAVED_CHECKS) do
+        local v = data[e.key]
+        if e.key == "facing_me" and (type(data.version) ~= "number" or data.version < 2) then
+            v = 0
+        end
+        if e.key == "dodge_on" and (type(data.version) ~= "number" or data.version < 3) then
+            v = 0
+        end
+        if type(v) == "number" then
+            pcall(function() ui.setvalue(MENU_NAME, e.label, v ~= 0) end)
+        end
+    end
+    for _, e in ipairs(SAVED_SLIDERS) do
+        local v = data[e.key]
+        if type(data.version) ~= "number" or data.version < 5 then
+            if e.key == "window_s" then
+                v = ParryWindowMs
+            elseif e.key == "offset_s" then
+                v = ParryOffsetMs
+            elseif e.key == "default_s" then
+                v = DefaultParryTimeMs
+            end
+        end
+        if type(v) == "number" then
+            pcall(function() ui.setvalue(MENU_NAME, e.label, v) end)
+        end
+    end
+    return true
+end
+
+local last_settings_json = ""
+local settings_check_at = 0
+
+local function settings_watch(now)
+    if now - settings_check_at < 1000 then return end
+    settings_check_at = now
+
+    local ok, current = pcall(function() return table_to_JSON(settings_snapshot()) end)
+    if not ok then return end
+
+    if current ~= last_settings_json then
+        last_settings_json = current
+        settings_save()
+    end
+end
+
+-- ================= state =================
+local AnimRegistry = {}
+local LocalSeenSuccess = {}
+local LocalSeenStun = {}
+local LocalSeenFail = {}
+local HeightCache = {}
+local TargetStyleCache = {}
+local EspTargets = {}
+local EspTargetsAt = 0
+
+local KeyHeld = false
+local ReleaseAt = 0
+local LastPressAt = -999999
+local PressConfirmUntil = 0
+local PressConfirmAt = 0
+local DelayedBlocks = {}
+
+local ParryStats = {}
+local TimingState = {
+    ping = 50,
+    sampledAt = 0,
+}
+local OutcomeState = {
+    nextId = 0,
+    pending = {},
+    humanoidId = nil,
+    signalHumanoidId = nil,
+    health = nil,
+}
+
+-- ================= helpers =================
+local function valid(inst)
+    return inst and inst:isvalid()
+end
+
+local function rd_ptr(inst, offset)
+    if not inst then return nil end
+    local ok, v = pcall(inst.read_memory, inst, offset, MEMORY_POINTER)
+    if ok and v then return v end
+    return nil
+end
+
+local function rd_float(inst, offset)
+    if not inst then return nil end
+    local ok, v = pcall(inst.read_memory, inst, offset, MEMORY_FLOAT)
+    if ok then return v end
+    return nil
+end
+
+local function rd_str(inst, offset)
+    if not inst then return nil end
+    local ok, v = pcall(inst.read_memory, inst, offset, MEMORY_STRING)
+    if ok then return v end
+    return nil
+end
+
+local function clamp(v, a, b)
+    if v < a then return a end
+    if v > b then return b end
+    return v
+end
+
+TimingState.update = function(now)
+    if now - TimingState.sampledAt < 250 then return end
+    TimingState.sampledAt = now
+
+    local ok, sample = pcall(get_ping)
+    if not ok or type(sample) ~= "number" or sample <= 0 then return end
+    if sample < 1 then sample = sample * 1000 end
+    sample = clamp(sample, 1, 500)
+    TimingState.ping = TimingState.ping + ((sample - TimingState.ping) * 0.20)
+end
+
+TimingState.compensation = function()
+    if not ping_on:get_value() then return 0 end
+    return clamp(TimingState.ping * 0.5, 0, 80)
+end
+
+local function flat_dist2(a, b)
+    local dx = a.x - b.x
+    local dz = a.z - b.z
+    return (dx * dx) + (dz * dz)
+end
+
+local function flat_dot(fx, fz, dx, dz)
+    return (fx * dx) + (fz * dz)
+end
+
+local function sync_offsets()
+    if offsets_synced then return end
+    local aa = rawget(_G, "Animator_ActiveAnimationsOffset")
+    local an = rawget(_G, "AnimationTrack_AnimationOffset")
+    local tp = rawget(_G, "AnimationTrack_TimePositionOffset")
+    local id = rawget(_G, "Misc_AnimationIdOffset")
+    local gt = rawget(_G, "GuiObject_TextOffset")
+    if type(gt) == "number" then OFF.GuiText = gt end
+    if type(aa) == "number" then OFF.ActiveAnimations = aa end
+    if type(an) == "number" then OFF.AnimTrack = an end
+    if type(tp) == "number" then OFF.TimePosition = tp end
+    if type(id) == "number" then OFF.AnimationId = id end
+    if type(aa) == "number" and type(an) == "number" and type(tp) == "number" and type(id) == "number" then
+        offsets_synced = true
+        if debug_on:get_value() then log.add("[offsets] synced from Offset API", COLOR_CYAN) end
+    end
+end
+
+local function get_local_player()
+    local players = game:get_service("Players")
+    return valid(players) and players.local_player or nil
+end
+
+local function get_my_root()
+    local lp = get_local_player()
+    local char = valid(lp) and lp.character or nil
+    return valid(char) and char:find_first_child("HumanoidRootPart") or nil
+end
+
+local function get_animator(char)
+    if not valid(char) then return nil end
+    local hum = char:find_first_child_class("Humanoid")
+    if not valid(hum) then return nil end
+    return hum:find_first_child_class("Animator")
+end
+
+local function read_active_animations(animator)
+    local out = {}
+    if not valid(animator) then return out end
+
+    local list = rd_ptr(animator, OFF.ActiveAnimations)
+    if not list then return out end
+
+    local origin_id = list.identity
+    local node = rd_ptr(list, OFF.ListNext)
+    local i = 0
+    while node and node.identity ~= origin_id and i < 30 do
+        i = i + 1
+        local slot = rd_ptr(node, OFF.NodeSlot)
+        local anim = slot and rd_ptr(slot, OFF.AnimTrack) or nil
+        local asset = anim and rd_str(anim, OFF.AnimationId) or nil
+        if asset then
+            out[asset] = rd_float(slot, OFF.TimePosition) or 0
+        end
+        node = rd_ptr(node, OFF.ListNext)
+    end
+
+    return out
+end
+
+local function get_height(char)
+    if not valid(char) then return nil end
+    local root = char:find_first_child("HumanoidRootPart")
+    local head = char:find_first_child("Head")
+    if not valid(root) or not valid(head) then return nil end
+
+    local dy = head.position.y - root.position.y
+    local id = char.identity
+
+    if dy < 0.5 or dy > 3.0 then
+        return HeightCache[id]
+    end
+
+    if not HeightCache[id] or dy > HeightCache[id] then
+        HeightCache[id] = dy
+    end
+    return HeightCache[id]
+end
+
+local function get_current_height_attr(char)
+    if not valid(char) then return nil end
+    local ok, result = pcall(function()
+        local data = char:find_first_child("PlayerData")
+        if not valid(data) then return nil end
+        return data:get_attribute("CurrentHeight", ATTR_NUMBER)
+    end)
+    if ok then return result end
+    return nil
+end
+
+local function flat_look(root)
+    local look = root.cframe_lookvector
+    local x = look and (look.x or 0) or 0
+    local z = look and (look.z or -1) or -1
+    local mag = math.sqrt((x * x) + (z * z))
+    if mag < 0.001 then return 0, -1 end
+    return x / mag, z / mag
+end
+
+-- ================= parry press primitives =================
+local function block_start(now, hold_ms)
+    if now - LastPressAt < ParryCooldownMs then return false end
+    if KeyHeld then
+        input.simulate_press_up(KEY_PARRY)
+        KeyHeld = false
+    end
+    input.simulate_press_down(KEY_PARRY)
+    KeyHeld = true
+    LastPressAt = now
+    ReleaseAt = now + (hold_ms or BlockHoldMs)
+    PressConfirmUntil = now + 48
+    PressConfirmAt = now + 8
+    return true
+end
+
+local function get_target_style(target)
+    local key = tostring(target.player.identity)
+    local cached = TargetStyleCache[key]
+    if cached then return cached end
+
+    local sources = { target.character, target.character:find_first_child("PlayerData") }
+    for _, source in ipairs(sources) do
+        if valid(source) then
+            for _, attr_name in ipairs({ "FightingStyle", "CombatStyle", "Style", "CurrentStyle", "SelectedStyle" }) do
+                local ok, value = pcall(function()
+                    return source:get_attribute(attr_name, ATTR_STRING)
+                end)
+                if ok and type(value) == "string" and value ~= "" then
+                    return value
+                end
+            end
+        end
+    end
+    return "Unknown"
+end
+
+local function block_end()
+    if KeyHeld then
+        input.simulate_press_up(KEY_PARRY)
+        KeyHeld = false
+    end
+    PressConfirmUntil = 0
+    PressConfirmAt = 0
+end
+
+local function key_frame(now)
+    if KeyHeld and now <= PressConfirmUntil and now >= PressConfirmAt then
+        PressConfirmAt = now + 8
+        local ok, is_down = pcall(input.key_down, KEY_PARRY)
+        if not ok or not is_down then
+            input.simulate_press_down(KEY_PARRY)
+        end
+    end
+
+    if KeyHeld and now >= ReleaseAt then
+        block_end()
+    end
+
+    for i = #DelayedBlocks, 1, -1 do
+        local pending = DelayedBlocks[i]
+        if now >= pending.at then
+            table.remove(DelayedBlocks, i)
+            block_start(now, pending.hold)
+        end
+    end
+end
+
+local function do_dodge()
+    block_end()
+    for i = 1, 12 do
+        input.simulate_press_down(KEY_DODGE)
+        input.simulate_press_up(KEY_DODGE)
+    end
+end
+
+GameConfig["rbxassetid://132022052139564"] = {
+    Style = "BoxingAnims",
+    DisplayName = "M2",
+    ParryTimeMs = 490,
+    ParryWindowMs = 40,
+    HoldMs = 350,
+    SecondParryTimeMs = 930,
+    SecondParryWindowMs = 40,
+    SecondHoldMs = 600,
+    DodgeTime = 400,
+    DodgeWindowMs = 100,
+    PostDodgeBlockDelay = 350,
+    PostDodgeBlockHold = 600,
+}
+
+-- ================= remote-attacker evaluation =================
+local function height_coeff(style, is_heavy)
+    if style == "WrestlingAnims" then return is_heavy and 0.22 or 0.36 end
+    if style == "HakariAnims" or style == "HakariOtherAnims" then return is_heavy and 0.18 or 0.34 end
+    return is_heavy and 0.16 or 0.24
+end
+
+local function height_adjust_ms(char, my_root, base_ms, style, is_heavy)
+    if not height_on:get_value() then return 0 end
+
+    local local_player = get_local_player()
+    local local_char = valid(local_player) and local_player.character or nil
+    local attacker_attr = get_current_height_attr(char)
+    local local_attr = get_current_height_attr(local_char)
+    local delta
+
+    if type(attacker_attr) == "number" and type(local_attr) == "number" then
+        delta = attacker_attr - local_attr
+    else
+        delta = (get_height(char) or 1.5) - 1.5
+    end
+
+    local attacker_root = char:find_first_child("HumanoidRootPart")
+    if valid(attacker_root) and valid(my_root) then
+        local vertical = attacker_root.position.y - my_root.position.y
+        if math.abs(vertical) > 1 then
+            delta = delta + clamp(vertical * 0.12, -0.25, 0.35)
+        end
+    end
+
+    local adj = base_ms * height_coeff(style, is_heavy) * delta
+    local min_adj = -100
+    if style == "BoxingAnims" then min_adj = -12 end
+    if style == "WrestlingAnims" then min_adj = -18 end
+    return clamp(adj, min_adj, 100)
+end
+
+local function check_direction(is_heavy, my_root, attacker_root)
+    if is_heavy then return true end
+
+    local mp = my_root.position
+    local ap = attacker_root.position
+    local dx = ap.x - mp.x
+    local dz = ap.z - mp.z
+    local mag = math.sqrt((dx * dx) + (dz * dz))
+    if mag < 0.001 then return true end
+    dx, dz = dx / mag, dz / mag
+
+    if facing_them:get_value() then
+        local fx, fz = flat_look(attacker_root)
+        if flat_dot(fx, fz, -dx, -dz) < 0.25 then return false end
+    end
+    if facing_me:get_value() then
+        local deg = cone_s:get_value()
+        if deg < 360 then
+            local fx, fz = flat_look(my_root)
+            if flat_dot(fx, fz, dx, dz) < math.cos((deg / 2) * (math.pi / 180)) then return false end
+        end
+    end
+    return true
+end
+
+local function is_heavy_move(display_name)
+    return display_name == "M2" or display_name == "Whirlwind" or display_name == "MomentumM2"
+end
+
+local DodgeTimingByStyle = {
+    KarateAnims = { time = 300, window = 100 },
+    BasicAnims = { time = 300, window = 100 },
+    WrestlingAnims = { time = 400, window = 100 },
+    MuayThaiAnims = { time = 300, window = 100 },
+    BoxingAnims = { time = 300, window = 100 },
+    HakariAnims = { time = 350, window = 100 },
+    HakariOtherAnims = { time = 350, window = 100 },
+    CapoeiraAnims = { time = 280, window = 100 },
+    SluggerAnims = { time = 580, window = 120 },
+    StrikerAnims = { time = 300, window = 100 },
+    KureAnims = { time = 80, window = 80 },
+}
+
+local function dodge_timing_for(cfg)
+    local tuned = DodgeTimingByStyle[cfg.Style] or {}
+    return cfg.DodgeTime or tuned.time or 360, cfg.DodgeWindowMs or tuned.window or 100
+end
+
+local function make_attack_registry(now, tpos, char, my_root, cfg, should_dodge)
+    local dodge_time, dodge_window = dodge_timing_for(cfg)
+    local base_end = should_dodge and dodge_time or cfg.ParryTimeMs
+    base_end = base_end or default_s:get_value()
+    local is_heavy = is_heavy_move(cfg.DisplayName)
+    local window = should_dodge and dodge_window or (cfg.ParryWindowMs or window_s:get_value())
+    if cfg.Style == "BoxingAnims" and not should_dodge and not is_heavy then
+        local attacker_height = get_current_height_attr(char)
+        if type(attacker_height) == "number" and attacker_height <= 1.05 then
+            base_end = base_end + 25
+        end
+    end
+    local height_adjustment = height_adjust_ms(char, my_root, base_end, cfg.Style, is_heavy)
+    local ping_adjustment = TimingState.compensation()
+    local start_time = now - (tpos * 1000)
+    local adjusted_end = base_end + height_adjustment + offset_s:get_value()
+    local effective_start = adjusted_end - window - ping_adjustment
+
+    return {
+        startTime = start_time,
+        blockStart = start_time + effective_start,
+        blockExpire = start_time + adjusted_end,
+        trackTime = tpos,
+        processed = false,
+        stage = 1,
+        shouldDodge = should_dodge,
+        holdMs = cfg.HoldMs or BlockHoldMs,
+        parryEnd = base_end,
+        parryWindow = window,
+        effectiveStart = effective_start,
+        heightAdjustment = height_adjustment,
+        pingAdjustment = ping_adjustment,
+    }
+end
+
+OutcomeState.push = function(data)
+    OutcomeState.nextId = OutcomeState.nextId + 1
+    data.id = OutcomeState.nextId
+    OutcomeState.pending[#OutcomeState.pending + 1] = data
+end
+
+local function evaluate_attacker(plr, char, my_root)
+    local root = char:find_first_child("HumanoidRootPart")
+    local animator = get_animator(char)
+    if not valid(root) or not valid(animator) then return end
+
+    local dist2 = flat_dist2(root.position, my_root.position)
+    if dist2 > (range_s:get_value() * range_s:get_value()) then return end
+    if math.abs(root.position.y - my_root.position.y) > vert_s:get_value() then return end
+
+    get_height(char)
+
+    local anims = read_active_animations(animator)
+    local seen_this_tick = {}
+
+    for assetId, tpos in pairs(anims) do
+        local cfg = GameConfig[assetId]
+
+        if cfg then
+            TargetStyleCache[tostring(plr.identity)] = string.gsub(cfg.Style, "Anims$", "")
+            seen_this_tick[assetId] = true
+            local key = tostring(plr.identity) .. "|" .. assetId
+            local reg = AnimRegistry[key]
+            local now = get_tickcount()
+            local is_heavy = is_heavy_move(cfg.DisplayName)
+            local close_m2 = is_heavy and dodge_on:get_value()
+                and math.sqrt(dist2) <= dodge_range_s:get_value()
+
+            if not reg then
+                reg = make_attack_registry(now, tpos, char, my_root, cfg, close_m2)
+                AnimRegistry[key] = reg
+            end
+
+            if tpos < reg.trackTime - 0.02 then
+                reg = make_attack_registry(now, tpos, char, my_root, cfg, close_m2)
+                AnimRegistry[key] = reg
+            end
+            reg.trackTime = tpos
+
+            if not reg.processed then
+                if cfg.ParryFunction then
+                    cfg.ParryFunction({ reg = reg, char = char, style = cfg.Style, move = cfg.DisplayName })
+                elseif check_direction(is_heavy, my_root, root) then
+                    local now3 = get_tickcount()
+                    if now3 >= reg.blockStart and now3 <= reg.blockExpire then
+                        if reg.shouldDodge then
+                            reg.processed = true
+                            do_dodge()
+                            if cfg.PostDodgeBlockDelay then
+                                DelayedBlocks[#DelayedBlocks + 1] = {
+                                    at = now3 + cfg.PostDodgeBlockDelay,
+                                    hold = cfg.PostDodgeBlockHold or BlockHoldMs,
+                                }
+                            end
+                            if debug_on:get_value() then
+                                log.add(string.format("DODGE %s %s @ %.3f", cfg.Style, cfg.DisplayName, tpos), COLOR_YELLOW)
+                            end
+                        else
+                            if block_start(now3, reg.holdMs) then
+                                reg.processed = true
+                                local move_name = reg.stage == 2 and "M2 Downcut" or cfg.DisplayName
+                                OutcomeState.push({
+                                    style = cfg.Style,
+                                    move = move_name,
+                                    at = now3,
+                                    parryEnd = reg.parryEnd,
+                                    parryWindow = reg.parryWindow,
+                                    attacker = tostring(plr.name or "?"),
+                                    attackerId = tostring(plr.identity),
+                                    assetId = assetId,
+                                    stage = reg.stage,
+                                    tpos = tpos,
+                                    ping = TimingState.ping,
+                                    heightAdjustment = reg.heightAdjustment or 0,
+                                    pingAdjustment = reg.pingAdjustment or 0,
+                                    effectiveStart = reg.effectiveStart,
+                                })
+                                if debug_on:get_value() then
+                                    log.add(string.format(
+                                        "PARRY %s %s t=%.3f ping=%.0fms comp=%.0fms",
+                                        cfg.Style,
+                                        move_name,
+                                        tpos,
+                                        TimingState.ping,
+                                        reg.pingAdjustment or 0
+                                    ), COLOR_GREEN)
+                                end
+
+                                if reg.stage == 1 and cfg.SecondParryTimeMs then
+                                    local second_adjust = height_adjust_ms(
+                                        char,
+                                        my_root,
+                                        cfg.SecondParryTimeMs,
+                                        cfg.Style,
+                                        true
+                                    )
+                                    local second_ping = TimingState.compensation()
+                                    local second_window = cfg.SecondParryWindowMs or window_s:get_value()
+                                    local second_end = cfg.SecondParryTimeMs + second_adjust + offset_s:get_value()
+                                    reg.stage = 2
+                                    reg.processed = false
+                                    reg.parryEnd = cfg.SecondParryTimeMs
+                                    reg.parryWindow = second_window
+                                    reg.holdMs = cfg.SecondHoldMs or BlockHoldMs
+                                    reg.heightAdjustment = second_adjust
+                                    reg.pingAdjustment = second_ping
+                                    reg.effectiveStart = second_end - second_window - second_ping
+                                    reg.blockStart = reg.startTime + reg.effectiveStart
+                                    reg.blockExpire = reg.startTime + second_end
+                                end
+                            elseif debug_on:get_value() and not reg.busyLogged then
+                                reg.busyLogged = true
+                                log.add(string.format(
+                                    "PARRY BUSY %s %s t=%.3f",
+                                    cfg.Style,
+                                    cfg.DisplayName,
+                                    tpos
+                                ), COLOR_YELLOW)
+                            end
+                        end
+                    elseif now3 > reg.blockExpire then
+                        reg.processed = true
+                        if debug_on:get_value() then
+                            log.add(string.format(
+                                "PARRY SKIPPED %s %s reason=window_expired t=%.3f",
+                                cfg.Style,
+                                cfg.DisplayName,
+                                tpos
+                            ), COLOR_RED)
+                        end
+                    end
+                end
+            end
+        elseif log_unknown:get_value() and not IgnoreIds[assetId] and not LoggedUnknown[assetId] then
+            LoggedUnknown[assetId] = true
+            log.add("[unknown] " .. assetId .. " (" .. tostring(plr.name) .. ")", COLOR_CYAN)
+        end
+    end
+
+    for key, _ in pairs(AnimRegistry) do
+        local prefix = tostring(plr.identity) .. "|"
+        if string.sub(key, 1, #prefix) == prefix then
+            local assetId = string.sub(key, #prefix + 1)
+            if not seen_this_tick[assetId] then
+                AnimRegistry[key] = nil
+            end
+        end
+    end
+end
+
+local function prioritized_targets(my_root)
+    local targets = {}
+    local lp = get_local_player()
+    if not valid(lp) or not valid(my_root) then return targets end
+
+    local radius = range_s:get_value()
+    local max_dist2 = radius * radius
+    for _, plr in pairs(get_players()) do
+        if valid(plr) and plr.identity ~= lp.identity then
+            local char = plr.character
+            local root = valid(char) and char:find_first_child("HumanoidRootPart") or nil
+            local hum = valid(char) and char:find_first_child_class("Humanoid") or nil
+            if valid(root) and valid(hum) and hum.health > 0 then
+                local dist2 = flat_dist2(root.position, my_root.position)
+                if dist2 <= max_dist2
+                    and math.abs(root.position.y - my_root.position.y) <= vert_s:get_value() then
+                    targets[#targets + 1] = {
+                        player = plr,
+                        character = char,
+                        root = root,
+                        humanoid = hum,
+                        dist2 = dist2,
+                    }
+                end
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b) return a.dist2 < b.dist2 end)
+    return targets
+end
+
+local function refresh_esp_targets(now, my_root)
+    if now - EspTargetsAt < 25 then return end
+    EspTargetsAt = now
+    EspTargets = prioritized_targets(my_root)
+    for _, target in ipairs(EspTargets) do
+        target.style = get_target_style(target)
+        target.health = math.max(0, target.humanoid.health or 0)
+        target.maxHealth = math.max(1, target.humanoid.max_health or 100)
+    end
+end
+
+local function scan_attackers()
+    local my_root = get_my_root()
+    if not valid(my_root) then return end
+
+    for _, target in ipairs(EspTargets) do
+        evaluate_attacker(target.player, target.character, my_root)
+    end
+end
+
+-- ================= local character: success / stun / fail signals =================
+local function diff_new(prev_set, cur_dict)
+    local fresh = {}
+    for assetId, tpos in pairs(cur_dict) do
+        local previous = prev_set[assetId]
+        if previous == nil or (type(previous) == "number" and tpos < previous - 0.02) then
+            fresh[#fresh + 1] = assetId
+        end
+    end
+    return fresh
+end
+
+local function snapshot_ids(dict)
+    local set = {}
+    for assetId, tpos in pairs(dict) do
+        set[assetId] = tpos
+    end
+    return set
+end
+
+OutcomeState.find_latest = function(now, max_age)
+    for i = #OutcomeState.pending, 1, -1 do
+        local action = OutcomeState.pending[i]
+        local age = now - action.at
+        if age >= 0 and age <= max_age then
+            return action, i
+        end
+    end
+    return nil, nil
+end
+
+OutcomeState.record = function(action, outcome, reason, extra)
+    if not action then return end
+
+    local key = action.style .. " " .. action.move
+    local stats = ParryStats[key]
+    if not stats then
+        stats = { hit = 0, miss = 0, unknown = 0 }
+        ParryStats[key] = stats
+    end
+
+    if outcome == "ok" then
+        stats.hit = stats.hit + 1
+    elseif outcome == "miss" then
+        stats.miss = stats.miss + 1
+    else
+        stats.unknown = stats.unknown + 1
+    end
+
+    local decided = stats.hit + stats.miss
+    local pct = decided > 0 and (stats.hit / decided) * 100 or 0
+    local label = string.format(
+        "%s %s (end=%dms start=%.0fms window=%dms t=%.3f ping=%.0fms age=%.0fms)",
+        action.style,
+        action.move,
+        action.parryEnd,
+        action.effectiveStart or action.parryEnd,
+        action.parryWindow or 0,
+        action.tpos or 0,
+        action.ping or 0,
+        action.resultAge or 0
+    )
+
+    if outcome == "ok" then
+        log.add(string.format(
+            "PARRY OK   %s  [%d/%d %.0f%%]",
+            label,
+            stats.hit,
+            decided,
+            pct
+        ), COLOR_GREEN)
+    elseif outcome == "miss" then
+        local detail = extra and string.format(" damage=%.2f", extra) or ""
+        log.add(string.format(
+            "PARRY MISS %s reason=%s%s  [%d/%d %.0f%%]",
+            label,
+            tostring(reason or "unknown"),
+            detail,
+            stats.hit,
+            decided,
+            pct
+        ), COLOR_RED)
+    elseif debug_on:get_value() then
+        log.add(string.format(
+            "PARRY NO RESULT %s  [unresolved=%d]",
+            label,
+            stats.unknown
+        ), COLOR_YELLOW)
+    end
+end
+
+OutcomeState.resolve_latest = function(outcome, reason, now, max_age, extra)
+    local action, index = OutcomeState.find_latest(now, max_age)
+    if not action then return false end
+    table.remove(OutcomeState.pending, index)
+    action.resultAge = now - action.at
+    OutcomeState.record(action, outcome, reason, extra)
+    return true
+end
+
+OutcomeState.expire = function(now)
+    for i = #OutcomeState.pending, 1, -1 do
+        local action = OutcomeState.pending[i]
+        if now - action.at > 1100 then
+            table.remove(OutcomeState.pending, i)
+            action.resultAge = now - action.at
+            OutcomeState.record(action, "unknown", "timeout")
+        end
+    end
+end
+
+OutcomeState.health_frame = function(now)
+    local lp = get_local_player()
+    local char = valid(lp) and lp.character or nil
+    local hum = valid(char) and char:find_first_child_class("Humanoid") or nil
+    if not valid(hum) then
+        OutcomeState.humanoidId = nil
+        OutcomeState.health = nil
+        return
+    end
+
+    local ok, health = pcall(function() return hum.health end)
+    if not ok or type(health) ~= "number" then return end
+
+    local identity = tostring(hum.identity)
+    if OutcomeState.humanoidId ~= identity or OutcomeState.health == nil or health > OutcomeState.health then
+        if OutcomeState.humanoidId ~= identity then
+            OutcomeState.pending = {}
+        end
+        OutcomeState.humanoidId = identity
+        OutcomeState.health = health
+        return
+    end
+
+    local damage = OutcomeState.health - health
+    OutcomeState.health = health
+    if damage > 0.01 then
+        local resolved = OutcomeState.resolve_latest("miss", "health_loss", now, 800, damage)
+        if not resolved and debug_on:get_value() then
+            log.add(string.format("HEALTH LOSS unattributed damage=%.2f", damage), COLOR_RED)
+        end
+    end
+end
+
+local function check_local_signals()
+    local lp = get_local_player()
+    local char = valid(lp) and lp.character or nil
+    local hum = valid(char) and char:find_first_child_class("Humanoid") or nil
+    local animator = get_animator(char)
+    if not valid(hum) or not valid(animator) then return end
+
+    local now = get_tickcount()
+    local anims = read_active_animations(animator)
+    local humanoid_id = tostring(hum.identity)
+    if OutcomeState.signalHumanoidId ~= humanoid_id then
+        OutcomeState.signalHumanoidId = humanoid_id
+        LocalSeenSuccess = snapshot_ids(anims)
+        LocalSeenStun = snapshot_ids(anims)
+        LocalSeenFail = snapshot_ids(anims)
+        return
+    end
+
+    for _, assetId in ipairs(diff_new(LocalSeenSuccess, anims)) do
+        if ParriedAnimation[assetId] then
+            if OutcomeState.resolve_latest("ok", "perfect_block_anim", now, 650) then
+                block_end()
+                LastPressAt = -999999
+            end
+        end
+    end
+    for _, assetId in ipairs(diff_new(LocalSeenStun, anims)) do
+        if StunnedAnimation[assetId] then
+            block_end()
+            LastPressAt = now
+            if debug_on:get_value() then log.add("STUNNED -- releasing block", COLOR_RED) end
+        end
+    end
+    for _, assetId in ipairs(diff_new(LocalSeenFail, anims)) do
+        if ParryFailed[assetId] then
+            OutcomeState.resolve_latest("miss", "fail_animation", now, 800)
+        end
+    end
+
+    OutcomeState.expire(now)
+
+    LocalSeenSuccess = snapshot_ids(anims)
+    LocalSeenStun = snapshot_ids(anims)
+    LocalSeenFail = snapshot_ids(anims)
+end
+
+-- ================= parry ESP (render hook only, drawn fresh every frame) =================
+local RING_SEGMENTS = 40
+local FEET_OFFSET = 3
+
+local function get_camera()
+    local ws = game:get_service("Workspace")
+    if not valid(ws) then return nil end
+    return ws:find_first_child_class("Camera")
+end
+
+local function in_front_of_camera(cam, world_pos)
+    if not valid(cam) then return false end
+    local cam_pos = cam.camera_position
+    local look = cam.camera_lookvector
+    local dx = world_pos.x - cam_pos.x
+    local dy = world_pos.y - cam_pos.y
+    local dz = world_pos.z - cam_pos.z
+    return (dx * look.x) + (dy * look.y) + (dz * look.z) > 0
+end
+
+local function draw_range_ring(cam, cx, cy, cz, radius, ring_color)
+    local points = {}
+    for i = 0, RING_SEGMENTS do
+        local ang = (i / RING_SEGMENTS) * math.pi * 2
+        local wp = vector3(cx + math.cos(ang) * radius, cy, cz + math.sin(ang) * radius)
+        local ok = in_front_of_camera(cam, wp)
+        local sp = ok and world_to_screen(wp) or nil
+        if ok then ok = in_screen(sp) end
+        if ok then
+            points[#points + 1] = sp
+        elseif #points >= 2 then
+            render.add_polyline(points, ring_color, 8)
+            points = {}
+        else
+            points = {}
+        end
+    end
+    if #points >= 2 then
+        render.add_polyline(points, ring_color, 8)
+    end
+end
+
+local function draw_cone_line(cam, cx, cy, cz, fx, fz, ang, radius)
+    local ca = math.cos(ang)
+    local sa = math.sin(ang)
+    local rx = fx * ca - fz * sa
+    local rz = fx * sa + fz * ca
+    local a_wp = vector3(cx, cy, cz)
+    local b_wp = vector3(cx + rx * radius, cy, cz + rz * radius)
+    if not in_front_of_camera(cam, a_wp) or not in_front_of_camera(cam, b_wp) then return end
+    local a = world_to_screen(a_wp)
+    local b = world_to_screen(b_wp)
+    if in_screen(a) and in_screen(b) then
+        render.add_line(a, b, CONE_COLOR, 8)
+    end
+end
+
+local function draw_box(cam, root, col, thick)
+    local p = root.position
+    local top_wp = vector3(p.x, p.y + 3, p.z)
+    local bot_wp = vector3(p.x, p.y - 3, p.z)
+    if not in_front_of_camera(cam, top_wp) or not in_front_of_camera(cam, bot_wp) then return end
+
+    local top = world_to_screen(top_wp)
+    local bot = world_to_screen(bot_wp)
+    if not in_screen(top) or not in_screen(bot) then return end
+
+    local y1 = top.y
+    local y2 = bot.y
+    if y1 > y2 then y1, y2 = y2, y1 end
+    local h = y2 - y1
+    if h < 8 then return end
+
+    local w = math.max(20, h * 0.45)
+    local x = (top.x + bot.x) / 2
+    render.add_rect(vector2(x - w / 2, y1), vector2(x + w / 2, y2), col, 0, thick or 2)
+end
+
+local function draw_target_label(cam, target, col)
+    local p = target.root.position
+    local wp = vector3(p.x, p.y + 3.35, p.z)
+    if not in_front_of_camera(cam, wp) then return end
+
+    local sp = world_to_screen(wp)
+    if not in_screen(sp) then return end
+
+    local health = target.health or 0
+    local max_health = target.maxHealth or 100
+    local health_ratio = clamp(health / max_health, 0, 1)
+    local style = target.style or "Unknown"
+    local name = tostring(target.player.name or "?")
+    local style_width = #style * 21
+    local name_width = #name * 7
+
+    render.add_text(vector2(sp.x - style_width / 2, sp.y - 58), style, COLOR_WHITE, 42, true)
+    render.add_text(vector2(sp.x - name_width / 2, sp.y - 15), name, col, 14, true)
+
+    local bar_width = 130
+    local bar_height = 9
+    local bar_left = sp.x - bar_width / 2
+    local bar_top = sp.y + 3
+    local bar_color = color(1 - health_ratio, health_ratio, 0.12, 1)
+    render.add_rect_filled(
+        vector2(bar_left, bar_top),
+        vector2(bar_left + bar_width, bar_top + bar_height),
+        color(0.03, 0.03, 0.03, 0.9),
+        0
+    )
+    render.add_rect_filled(
+        vector2(bar_left + 2, bar_top + 2),
+        vector2(bar_left + 2 + ((bar_width - 4) * health_ratio), bar_top + bar_height - 2),
+        bar_color,
+        0
+    )
+    render.add_rect(
+        vector2(bar_left, bar_top),
+        vector2(bar_left + bar_width, bar_top + bar_height),
+        COLOR_WHITE,
+        0,
+        2
+    )
+
+    local hp_text = string.format("%.0f / %.0f HP", health, max_health)
+    local hp_width = #hp_text * 6
+    render.add_text(vector2(sp.x - hp_width / 2, bar_top + 11), hp_text, COLOR_WHITE, 12, true)
+end
+
+local function draw_parry_esp()
+    local my_root = get_my_root()
+    if not valid(my_root) then return end
+
+    local cam = get_camera()
+    local p = my_root.position
+    local radius = range_s:get_value()
+    local cy = p.y - FEET_OFFSET
+
+    if show_esp:get_value() then
+        draw_range_ring(cam, p.x, cy, p.z, radius, RING_COLOR)
+        if facing_me:get_value() then
+            local deg = cone_s:get_value()
+            if deg < 360 then
+                local fx, fz = flat_look(my_root)
+                local half = (deg / 2) * (math.pi / 180)
+                draw_cone_line(cam, p.x, cy, p.z, fx, fz, half, radius)
+                draw_cone_line(cam, p.x, cy, p.z, fx, fz, -half, radius)
+            end
+        end
+    end
+
+    if dodge_on:get_value() and show_dodge_esp:get_value() then
+        draw_range_ring(cam, p.x, cy, p.z, dodge_range_s:get_value(), DODGE_RING_COLOR)
+    end
+
+    if not mark_rng:get_value() then return end
+
+    for index, target in ipairs(EspTargets) do
+        local ok_angle = check_direction(false, my_root, target.root)
+        if not mark_gate:get_value() or ok_angle then
+            local target_color = index == 1 and RANGE_COLOR or OTHER_TARGET_COLOR
+            draw_box(cam, target.root, target_color, ok_angle and 8 or 4)
+            draw_target_label(cam, target, target_color)
+        end
+    end
+end
+
+-- ============================================================================
+-- ============================================================================
+local DEFAULT_KEYS = { 0x58, 0x43, 0x4E, 0x4D, 0x56, 0x42, 0x47, 0x48 }
+local currentKeys = { 0x58, 0x43, 0x4E, 0x4D }
+local activeLaneCount = 4
+
+local HOLD_MIN_H = 20
+local TAP_HOLD_MS = 30
+local TOUCH_DIST = 16
+local PAST_CATCH = 16
+local LANE_MATCH_X = 150
+local PARKED_COORD = -5000
+local MAX_NOTES_PER_LANE = 12
+
+local LANE_COLORS = {
+    color(210 / 255, 70 / 255, 255 / 255, 1),
+    color(255 / 255, 60 / 255, 130 / 255, 1),
+    color(0, 200 / 255, 255 / 255, 1),
+    color(40 / 255, 220 / 255, 90 / 255, 1),
+}
+local COLOR_ON_LINE = COLOR_WHITE
+local COLOR_HOLD = color(1, 220 / 255, 70 / 255, 1)
+local LINE_COLOR = color(1, 235 / 255, 60 / 255, 1)
+
+local guiActive = false
+local uiReceptorData = nil
+local uiLanesContainer = nil
+
+local hit_count = 0
+local dist_sum = 0
+local worst_dist = 0
+
+local tapping = { false, false, false, false }
+local tapRelease = { 0, 0, 0, 0 }
+local holdingActive = { false, false, false, false }
+
+local laneArmed = { true, true, true, true }
+local prevDist = { nil, nil, nil, nil }
+local holdStart = { 0, 0, 0, 0 }
+local holdMiss = { 0, 0, 0, 0 }
+local lastScanAt = nil
+local pendingAt = { nil, nil, nil, nil }
+local pendingHold = { false, false, false, false }
+local pendingTailH = { 0, 0, 0, 0 }
+local pendingD = { 0, 0, 0, 0 }
+local pendingSpeed = { 0, 0, 0, 0 }
+local pendingFrom = { 0, 0, 0, 0 }
+local laneHoldCount = { 0, 0, 0, 0 }
+local HOLD_GRACE_TICKS = 4
+local REARM_DIST = 40
+
+local lastLaneRenderData = { {}, {}, {}, {} }
+
+local function tryGet(fn)
+    local ok, v = pcall(fn)
+    if ok and v ~= nil then return v end
+    return nil
+end
+
+local function read_gui_text(inst)
+    if not valid(inst) then return nil end
+    local s = rd_str(inst, OFF.GuiText)
+    if type(s) ~= "string" or s == "" then return nil end
+    return s
+end
+
+local function key_from_text(s)
+    if not s then return nil end
+    local c = string.upper(string.sub(s, 1, 1))
+    local b = string.byte(c)
+    if not b then return nil end
+    if b >= 65 and b <= 90 then return b end
+    if b >= 48 and b <= 57 then return b end
+    return nil
+end
+
+local function vk_name(vk)
+    if not vk then return "?" end
+    if vk >= 65 and vk <= 90 then return string.char(vk) end
+    if vk >= 48 and vk <= 57 then return string.char(vk) end
+    return string.format("0x%02X", vk)
+end
+
+local function release_all_instrument_keys()
+    for i = 1, 4 do
+        if currentKeys[i] then
+            input.simulate_press_up(currentKeys[i])
+        end
+        tapping[i] = false
+        holdingActive[i] = false
+        laneArmed[i] = true
+        prevDist[i] = nil
+        holdMiss[i] = 0
+        pendingAt[i] = nil
+        lastLaneRenderData[i] = {}
+    end
+end
+
+local function get_scale()
+    local screen = get_screen_size()
+    if screen and screen.y then return screen.y / 1080 end
+    return 1
+end
+
+local function get_song_label()
+    local lp = get_local_player()
+    if not valid(lp) then return "?" end
+    local pgui = tryGet(function() return lp:find_first_child("PlayerGui") end)
+    if not valid(pgui) then return "?" end
+    local rsUI = tryGet(function() return pgui:find_first_child("RhythmServiceUI") end)
+    if not valid(rsUI) then return "?" end
+    local root = tryGet(function() return rsUI:find_first_child("RhythmRoot") end)
+    if not valid(root) then return "?" end
+    local credits = tryGet(function() return root:find_first_child("SongCredits") end)
+    if not valid(credits) then return "?" end
+
+    local title = read_gui_text(tryGet(function() return credits:find_first_child("Title") end))
+    local charter = read_gui_text(tryGet(function() return credits:find_first_child("Charter") end))
+    if title and charter then return title .. " [" .. charter .. "]" end
+    return title or "?"
+end
+
+local function setup_instrument_gui()
+    local lp = get_local_player()
+    if not valid(lp) then return false end
+
+    local player_gui = tryGet(function() return lp:find_first_child("PlayerGui") end)
+    if not valid(player_gui) then return false end
+
+    local rsUI = tryGet(function() return player_gui:find_first_child("RhythmServiceUI") end)
+    if not valid(rsUI) then return false end
+
+    local root = tryGet(function() return rsUI:find_first_child("RhythmRoot") end)
+    if not valid(root) then return false end
+
+    local receptors = tryGet(function() return root:find_first_child("Receptors") end)
+    local lanesHost = tryGet(function() return root:find_first_child("Lanes") end)
+    if not valid(receptors) or not valid(lanesHost) then return false end
+
+    local newReceptors = {}
+    local newKeys = {}
+    local validLanes = 0
+
+    for i = 1, 8 do
+        local rec = tryGet(function() return receptors:find_first_child("Receptor" .. i) end)
+        if not valid(rec) then break end
+
+        local pos = tryGet(function() return rec.gui_position end)
+        local size = tryGet(function() return rec.gui_size end)
+        if pos and size then
+            newReceptors[i] = {
+                cx = pos.x + (size.x / 2),
+                hitY = pos.y + (size.y / 2),
+            }
+
+            local hint = tryGet(function() return rec:find_first_child("KeyHint") end)
+            local hint_text = read_gui_text(hint)
+            newKeys[i] = key_from_text(hint_text) or DEFAULT_KEYS[i]
+            validLanes = validLanes + 1
+        end
+    end
+
+    if validLanes == 0 then return false end
+
+    activeLaneCount = validLanes
+    currentKeys = newKeys
+    uiReceptorData = newReceptors
+    uiLanesContainer = lanesHost
+    guiActive = true
+
+    local key_list = {}
+    for i = 1, activeLaneCount do
+        key_list[i] = vk_name(currentKeys[i])
+    end
+    log.add(string.format("[instrument] %s -- %d lanes, keys: %s, hit line y=%.0f",
+        get_song_label(), activeLaneCount, table.concat(key_list, " "),
+        newReceptors[1] and newReceptors[1].hitY or 0), COLOR_CYAN)
+
+    return true
+end
+
+local function instrument_gui_gone()
+    local lp = get_local_player()
+    if not valid(lp) then return true end
+    local player_gui = tryGet(function() return lp:find_first_child("PlayerGui") end)
+    if not valid(player_gui) then return true end
+    local rsUI = tryGet(function() return player_gui:find_first_child("RhythmServiceUI") end)
+    return not valid(rsUI)
+end
+
+local function instrument_scan_frame(now)
+    local rawNotes = tryGet(function() return uiLanesContainer:get_children() end)
+    if not rawNotes then return end
+
+    local dt = lastScanAt and (now - lastScanAt) or nil
+    lastScanAt = now
+
+    local laneCandidates = { {}, {}, {}, {} }
+    local laneHoldSeen = { false, false, false, false }
+    laneHoldCount = { 0, 0, 0, 0 }
+
+    for _, note in pairs(rawNotes) do
+        if tryGet(function() return note.class_name end) == "Frame"
+            and tryGet(function() return note.name end) == "NoteTemplate" then
+
+            local head = tryGet(function() return note:find_first_child("Head") end)
+            if valid(head) then
+                local pos = tryGet(function() return head.gui_position end)
+                local size = tryGet(function() return head.gui_size end)
+                if pos and size and pos.x > PARKED_COORD then
+                    local cxNote = pos.x + (size.x / 2)
+                    local cyNote = pos.y + (size.y / 2)
+
+                    local bestLane, minDist = nil, math.huge
+                    for i = 1, activeLaneCount do
+                        if uiReceptorData[i] then
+                            local d = math.abs(cxNote - uiReceptorData[i].cx)
+                            if d < minDist then
+                                minDist = d
+                                bestLane = i
+                            end
+                        end
+                    end
+
+                    if bestLane and minDist <= LANE_MATCH_X then
+                        local hitY = uiReceptorData[bestLane].hitY
+                        local distY = cyNote - hitY
+
+                        local tail = tryGet(function() return note:find_first_child("Tail") end)
+                        local tailH = tail and tryGet(function() return tail.gui_size.y end) or 0
+                        local isHold = tailH > HOLD_MIN_H
+
+                        if isHold then
+                            laneHoldCount[bestLane] = laneHoldCount[bestLane] + 1
+                            if cyNote >= hitY and (cyNote - tailH) < hitY then
+                                laneHoldSeen[bestLane] = true
+                            end
+                        end
+
+                        if distY <= PAST_CATCH then
+                            table.insert(laneCandidates[bestLane], {
+                                headY = cyNote,
+                                dist = distY,
+                                isHold = isHold,
+                                tailH = tailH,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for lane = 1, activeLaneCount do
+        local vk = currentKeys[lane]
+
+        if tapping[lane] and now >= tapRelease[lane] then
+            input.simulate_press_up(vk)
+            tapping[lane] = false
+        end
+
+        if holdingActive[lane] then
+            if laneHoldSeen[lane] then
+                holdMiss[lane] = 0
+            else
+                holdMiss[lane] = holdMiss[lane] + 1
+                if holdMiss[lane] >= HOLD_GRACE_TICKS then
+                    input.simulate_press_up(vk)
+                    holdingActive[lane] = false
+                end
+            end
+        end
+
+        local candidates = laneCandidates[lane]
+        table.sort(candidates, function(a, b) return a.headY > b.headY end)
+        lastLaneRenderData[lane] = candidates
+
+        local nearest = nil
+        for j, e in ipairs(candidates) do
+            if j > MAX_NOTES_PER_LANE then break end
+            if e.dist <= PAST_CATCH then
+                nearest = e
+                break
+            end
+        end
+
+        local d = nearest and nearest.dist or nil
+        local pv = prevDist[lane]
+
+        if not d or d < -REARM_DIST then
+            laneArmed[lane] = true
+            prevDist[lane] = d
+        else
+            prevDist[lane] = d
+        end
+
+        local v = (d and pv and d > -REARM_DIST) and (d - pv) or nil
+        local speed = (v and dt and dt > 0) and (v / dt) or nil
+
+        if d and laneArmed[lane] and speed and speed > 0 then
+            local ttc = -d / speed
+            if ttc <= dt + 2 then
+                laneArmed[lane] = false
+                pendingAt[lane] = now + math.max(0, ttc)
+                pendingHold[lane] = nearest.isHold
+                pendingTailH[lane] = nearest.tailH
+                pendingD[lane] = d
+                pendingSpeed[lane] = speed
+                pendingFrom[lane] = now
+            end
+        end
+    end
+end
+
+local function instrument_fire_pending(now)
+    for lane = 1, activeLaneCount do
+        local at = pendingAt[lane]
+        if at and now >= at then
+            local vk = currentKeys[lane]
+            pendingAt[lane] = nil
+
+            if tapping[lane] or holdingActive[lane] then
+                input.simulate_press_up(vk)
+                tapping[lane] = false
+                holdingActive[lane] = false
+            end
+            input.simulate_press_down(vk)
+
+            local off = pendingD[lane] + (pendingSpeed[lane] * (now - pendingFrom[lane]))
+            hit_count = hit_count + 1
+            dist_sum = dist_sum + math.abs(off)
+            if math.abs(off) > worst_dist then worst_dist = math.abs(off) end
+
+            if pendingHold[lane] then
+                holdingActive[lane] = true
+                holdStart[lane] = now
+                holdMiss[lane] = 0
+            else
+                tapping[lane] = true
+                tapRelease[lane] = now + TAP_HOLD_MS
+            end
+        end
+    end
+end
+
+local function draw_instrument_notes()
+    if not instrument_on:get_value() then return end
+    if not guiActive or not uiReceptorData then return end
+
+    local scale = get_scale()
+    for lane = 1, activeLaneCount do
+        local cx = uiReceptorData[lane] and uiReceptorData[lane].cx
+        if cx then
+            for _, e in ipairs(lastLaneRenderData[lane]) do
+                local onLine = e.dist >= -TOUCH_DIST and e.dist <= PAST_CATCH
+                local col = onLine and COLOR_ON_LINE or (e.isHold and COLOR_HOLD or LANE_COLORS[lane])
+                render.add_circle(vector2(cx, e.headY), 20 * scale, col)
+                if e.isHold and e.tailH > 0 then
+                    render.add_line(vector2(cx, e.headY), vector2(cx, e.headY - e.tailH), col, 4)
+                end
+            end
+        end
+    end
+end
+
+local function draw_instrument_esp()
+    if not instrument_on:get_value() then return end
+    if not guiActive or not uiReceptorData then return end
+
+    local scale = get_scale()
+    local first = uiReceptorData[1]
+    local last = uiReceptorData[activeLaneCount]
+    if first and last then
+        local lx = first.cx - (50 * scale)
+        local rx = last.cx + (50 * scale)
+        render.add_line(vector2(lx, first.hitY), vector2(rx, first.hitY), LINE_COLOR, 4 * scale)
+    end
+    draw_instrument_notes()
+end
+
+local instrumentLastCheck = 0
+local lastScanRun = 0
+local SCAN_INTERVAL_MS = 8
+
+local function instrument_tick(now)
+    instrument_fire_pending(now)
+
+    if now - instrumentLastCheck >= 500 then
+        instrumentLastCheck = now
+        if guiActive then
+            if instrument_gui_gone() then
+                if hit_count > 0 then
+                    log.add(string.format("[instrument] song over -- %d notes, avg off %.1fpx, worst %.1fpx",
+                        hit_count, dist_sum / hit_count, worst_dist), COLOR_CYAN)
+                end
+                guiActive = false
+                release_all_instrument_keys()
+                return
+            end
+        else
+            hit_count = 0
+            dist_sum = 0
+            worst_dist = 0
+            setup_instrument_gui()
+            return
+        end
+    end
+
+    if not guiActive then return end
+
+    if now - lastScanRun >= SCAN_INTERVAL_MS then
+        lastScanRun = now
+        instrument_scan_frame(now)
+    end
+end
+
+-- ================= copy-unknown implementation =================
+reset_settings = function()
+    for _, e in ipairs(SAVED_CHECKS) do
+        pcall(function() ui.setvalue(MENU_NAME, e.label, e.def) end)
+    end
+    for _, e in ipairs(SAVED_SLIDERS) do
+        pcall(function() ui.setvalue(MENU_NAME, e.label, e.def) end)
+    end
+
+    local ok, snapshot = pcall(function() return table_to_JSON(settings_snapshot()) end)
+    if ok then
+        last_settings_json = snapshot
+        if settings_save() then
+            log.add("[settings] reset to defaults and saved", COLOR_CYAN)
+        end
+    else
+        log.add("[settings] reset failed", COLOR_RED)
+    end
+end
+
+copy_unknown_ids = function()
+    local ids = {}
+    for assetId, _ in pairs(LoggedUnknown) do
+        table.insert(ids, (string.match(assetId, "%d+")) or assetId)
+    end
+    local text = table.concat(ids, ",")
+    input.set_clipboard(text)
+    log.add("Copied " .. tostring(#ids) .. " unknown ids", COLOR_CYAN)
+end
+
+-- ================= main loop + render =================
+local main_tick_ms = 8
+local INSTRUMENT_TICK_MS = 1
+
+local function main_loop(now)
+    sync_offsets()
+    settings_watch(now)
+    TimingState.update(now)
+    key_frame(now)
+
+    if not is_gamefocused() then return end
+
+    local my_root = get_my_root()
+    if valid(my_root) then
+        refresh_esp_targets(now, my_root)
+    else
+        EspTargets = {}
+    end
+
+    if instrument_on:get_value() then
+        instrument_tick(now)
+    elseif guiActive then
+        guiActive = false
+        release_all_instrument_keys()
+    end
+
+    if parry_on:get_value() and not guiActive then
+        scan_attackers()
+        check_local_signals()
+        OutcomeState.health_frame(now)
+    else
+        block_end()
+    end
+end
+
+spawn(function()
+    while _G.__perpetual_run == RUN_ID do
+        main_loop(get_tickcount())
+        wait(guiActive and INSTRUMENT_TICK_MS or main_tick_ms)
+    end
+    block_end()
+    release_all_instrument_keys()
+end)
+
+hook.add("render", "perpetual", function()
+    draw_parry_esp()
+
+    local held_str = KeyHeld and "  [F]" or ""
+    local instr_str = guiActive and ("  lanes=" .. tostring(activeLaneCount)) or "  lanes=none"
+    status_lbl:set_label("parry=" .. tostring(parry_on:get_value()) .. held_str ..
+        string.format("  ping=%.0fms", TimingState.ping) ..
+        "  instrument=" .. tostring(instrument_on:get_value()) .. instr_str)
+end)
+
+if settings_load() then
+    log.add("[settings] loaded " .. SETTINGS_FILE, COLOR_CYAN)
+end
+last_settings_json = select(2, pcall(function() return table_to_JSON(settings_snapshot()) end)) or ""
+
+log.add("perpetual loaded -- auto-parry + instrument", COLOR_GREEN)
+
+
+local label = string.format(
+        "%s %s (end=%.0fms start=%.0fms window=%.0fms t=%.3f ping=%.0fms age=%.0fms)",
+        tostring(action.style or "N/A"),
+        tostring(action.move or "Unknown"),
+        tonumber(action.parryEnd) or 0,
+        tonumber(action.effectiveStart or action.parryEnd) or 0,
+        tonumber(action.parryWindow) or 0, -- Argument #6 safe now
+        tonumber(action.tpos) or 0,
+        tonumber(action.ping) or 0,
+        tonumber(action.resultAge) or 0
+    )
