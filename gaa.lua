@@ -1013,16 +1013,17 @@ OutcomeState.record = function(action, outcome, reason, extra)
 
     local decided = stats.hit + stats.miss
     local pct = decided > 0 and (stats.hit / decided) * 100 or 0
+
     local label = string.format(
-        "%s %s (end=%dms start=%.0fms window=%dms t=%.3f ping=%.0fms age=%.0fms)",
-        action.style,
-        action.move,
-        action.parryEnd,
-        action.effectiveStart or action.parryEnd,
-        action.parryWindow or 0,
-        action.tpos or 0,
-        action.ping or 0,
-        action.resultAge or 0
+        "%s %s (end=%.0fms start=%.0fms window=%.0fms t=%.3f ping=%.0fms age=%.0fms)",
+        tostring(action.style or "N/A"),
+        tostring(action.move or "Unknown"),
+        tonumber(action.parryEnd) or 0,
+        tonumber(action.effectiveStart or action.parryEnd) or 0,
+        tonumber(action.parryWindow) or 0, -- Argument #6 safe now
+        tonumber(action.tpos) or 0,
+        tonumber(action.ping) or 0,
+        tonumber(action.resultAge) or 0
     )
 
     if outcome == "ok" then
