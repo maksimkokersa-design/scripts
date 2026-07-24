@@ -1,16 +1,3 @@
-local label = string.format(
-        "%s %s (end=%.0fms start=%.0fms window=%.0fms t=%.3f ping=%.0fms age=%.0fms)",
-        tostring(action.style or "N/A"),
-        tostring(action.move or "Unknown"),
-        tonumber(action.parryEnd) or 0,
-        tonumber(action.effectiveStart or action.parryEnd) or 0,
-        tonumber(action.parryWindow) or 0, -- Argument #6 safe now
-        tonumber(action.tpos) or 0,
-        tonumber(action.ping) or 0,
-        tonumber(action.resultAge) or 0
-    )
-
-
 hook.remove("render", "perpetual")
 gui.remove("perpetual")
 gui.remove("Gakuran V2")
