@@ -1014,16 +1014,17 @@ OutcomeState.record = function(action, outcome, reason, extra)
     local decided = stats.hit + stats.miss
     local pct = decided > 0 and (stats.hit / decided) * 100 or 0
     local label = string.format(
-        "%s %s (end=%.0fms start=%.0fms window=%.0fms t=%.3f ping=%.0fms age=%.0fms)",
-        action.style,
-        action.move,
-        action.parryEnd or 0,
-        action.effectiveStart or action.parryEnd or 0,
-        action.parryWindow or 0,
-        action.tpos or 0,
-        action.ping or 0,
-        action.resultAge or 0
+        "%s %s (end=%sms start=%sms window=%sms t=%s ping=%sms age=%sms)",
+        tostring(action.style),
+        tostring(action.move),
+        tostring(action.parryEnd or 0),
+        tostring(action.effectiveStart or action.parryEnd or 0),
+        tostring(action.parryWindow or 0),
+        tostring(action.tpos or 0),
+        tostring(action.ping or 0),
+        tostring(action.resultAge or 0)
     )
+
 
 
 
